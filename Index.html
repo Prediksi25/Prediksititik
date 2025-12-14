@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<title>Perkiraan 3D Pengeburan Minyak Realistis</title>
+<style>
+body{
+  margin:0;
+  overflow:hidden;
+  font-family:Arial;
+  background: linear-gradient(to top, #87ceeb 0%, #ffffff 50%, #cce0ff 100%);
+}
+#panel{position:absolute;top:10px;left:10px;background:rgba(255,255,255,0.95);padding:12px;border-radius:8px;max-width:350px;font-size:13px;}
+#titleOverlay{position:absolute;top:50px;left:50%;transform:translateX(-50%);color:#222;font-size:22px;font-weight:bold;background:rgba(255,255,255,0.7);padding:6px 12px;border-radius:6px;z-index:1;}
+#downloadBtn{position:absolute;top:10px;right:10px;padding:10px 14px;background:#2e7d32;color:white;border:none;border-radius:6px;cursor:pointer;font-weight:bold;}
+</style>
+</head>
+<body>
+
+<div id="panel"><b>Perkiraan AUTO-SCAN MINYAK</b><br>Arahkan kamera → titik sumur muncul secara otomatis dengan kedalaman ≥400 m.</div>
+<div id="titleOverlay">Perkiraan Titik Sumur yang Mengandung Minyak</div>
+<button id="downloadBtn">⬇ Download Peta</button>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.162.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.162.0/examples/js/controls/OrbitControls.js"></script>
+
+<script>
+// Scene setup
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xcce0ff); // masih ada untuk objek 3D
+const camera = new THREE.PerspectiveCamera(45,innerWidth/innerHeight,0.1,2000);
+camera.position.set(0,50,80);
+
+const renderer = new THREE.WebGLRenderer({antialias:true});
+renderer.setSize(innerWidth,innerHeight);
+document.body.appendChild(renderer.domElement);
+
+const controls = new THREE.OrbitControls(camera,renderer.domElement);
+controls.update();
+scene.add(new THREE.AmbientLight(0xffffff,0.6));
+const sun = new THREE.DirectionalLight(0xffffff,0.8);
+sun.position.set(50,50,50);
+scene.add(sun);
+
+// Topografi alami
+const groundGeo = new THREE.PlaneGeometry(120,120,120,120);
+const groundMat = new THREE.MeshPhongMaterial({vertexColors:true,side:THREE.DoubleSide});
+const ground = new THREE.Mesh(groundGeo,groundMat);
+ground.rotation.x=-Math.PI/2;
+scene.add(ground);
+
+const colors=[];
+const v = groundGeo.attributes.position.array;
+for(let i=0;i<v.length;i+=3){
+  const x=v[i], z=v[i+2];
+  const y = Math.exp(-((x+25)**2+(z-20)**2)/220)*6 +
+            Math.exp(-((x-10)**2+(z)**2)/200)*5 +
+            Math.exp(-((x+15)**2+(z+25)**2)/180)*4;
+  v[i+1]=y;
+  const c = new THREE.Color(0x1e6b1e).lerp(new THREE.Color(0x9be59b), y/6);
+  colors.push(c.r,c.g,c.b);
+}
+groundGeo.setAttribute('color',new THREE.Float32BufferAttribute(colors,3));
+groundGeo.computeVertexNormals();
+
+// Sungai alami
+const riverPath = [
+  new THREE.Vector3(-45,0,-35),
+  new THREE.Vector3(-25,0,-10),
+  new THREE.Vector3(0,0,5),
+  new THREE.Vector3(25,0,25)
+];
+const riverCurve = new THREE.CatmullRomCurve3(riverPath);
+const riverGeo = new THREE.TubeGeometry(riverCurve,50,0.5,8,false);
+const riverMat = new THREE.MeshPhongMaterial({color:0x3399ff});
+scene.add(new THREE.Mesh(riverGeo,riverMat));
+
+// Titik sumur kedalaman acak ≥400 m
+const wells=[];
+const generatedPositions=new Set();
+const drillingCylinders=[];
+
+function generateWellAt(x,z){
+  const key=`${Math.round(x)},${Math.round(z)}`;
+  if(generatedPositions.has(key)) return null;
+  generatedPositions.add(key);
+
+  const lat=(-2.34 + Math.random()*0.012).toFixed(6);
+  const lon=(103.45 + Math.random()*0.012).toFixed(6);
+  const heightAtSurface = Math.exp(-((x+25)**2+(z-20)**2)/220)*6 +
+                          Math.exp(-((x-10)**2+(z)**2)/200)*5 +
+                          Math.exp(-((x+15)**2+(z+25)**2)/180)*4;
+
+  const geo = new THREE.CylinderGeometry(0.5,0.5,0.1,16);
+  const mat = new THREE.MeshPhongMaterial({color:0xff0000,transparent:true,opacity:0.8});
+  const cyl = new THREE.Mesh(geo,mat);
+  cyl.position.set(x,heightAtSurface, z);
+
+  const randomDepth = 400 + Math.random()*100; // 400-500 m
+  cyl.userData.targetY = heightAtSurface - randomDepth;
+
+  scene.add(cyl);
+  drillingCylinders.push(cyl);
+
+  const pot=Math.floor(Math.random()*101);
+  let status, warna;
+  if(pot>70){ status="ADA MINYAK"; warna=0xff0000; }
+  else if(pot>40){ status="MINYAK TIPIS"; warna=0xffff00; }
+  else { status="KOSONG"; warna=0x0000ff; }
+  cyl.material.color.set(warna);
+
+  wells.push({
+    mesh: cyl,
+    name: `Sumur Real-${wells.length+1}`,
+    gps: `${lat},${lon}`,
+    depth: Math.round(randomDepth),
+    status: status,
+    pot: pot
+  });
+}
+
+// Auto-scan berbasis arah kamera
+function autoScan(){
+  const vector = new THREE.Vector3(0,0,-1);
+  vector.applyQuaternion(camera.quaternion);
+  const distance = 30;
+  const targetX = camera.position.x + vector.x * distance;
+  const targetZ = camera.position.z + vector.z * distance;
+  generateWellAt(targetX,targetZ);
+}
+
+// Animasi pengeboran
+function animateDrilling(){
+  drillingCylinders.forEach(c=>{
+    if(c.position.y>c.userData.targetY){
+      c.position.y -= 0.5;
+    }
+  });
+}
+
+// Update panel info
+function updatePanel(){
+  if(wells.length>0){
+    const last=wells[wells.length-1];
+    document.getElementById("panel").innerHTML=
+      `<b>${last.name}</b><br>
+       Koordinat: <b>${last.gps}</b><br>
+       Kedalaman: <b>${Math.round(last.depth)} m</b><br>
+       Status: <b>${last.status}</b><br>
+       Potensi: <b>${last.pot}%</b><br><br>
+       <small>⚠️ Data ini Perkiraan / prediksi</small>`;
+  }
+}
+
+// Download peta PNG
+document.getElementById("downloadBtn").addEventListener("click",()=>{
+  renderer.render(scene,camera);
+  const link=document.createElement("a");
+  link.download="perkiraan_titik_minyak_realistis.png";
+  link.href=renderer.domElement.toDataURL("image/png");
+  link.click();
+});
+
+scene.add(new THREE.AxesHelper(20));
+
+// Render loop
+function animate(){
+  requestAnimationFrame(animate);
+  controls.update();
+  autoScan();
+  animateDrilling();
+  updatePanel();
+  renderer.render(scene,camera);
+}
+animate();
+
+window.addEventListener('resize',()=>{
+  camera.aspect=innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth,innerHeight);
+});
+</script>
+</body>
+</html>
